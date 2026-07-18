@@ -10,6 +10,7 @@
   const caption = document.querySelector("#caption");
   const avatar = document.querySelector("#avatar-frame");
   const status = document.querySelector("#connection-status");
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
 
   let recorder;
@@ -210,7 +211,7 @@
   };
 
   const setupBargeIn = () => {
-    audioContext = new AudioContext();
+    audioContext = new AudioContextClass();
     const source = audioContext.createMediaStreamSource(micStream);
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 512;
@@ -267,25 +268,45 @@
   };
 
   allowButton.addEventListener("click", async () => {
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !window.AudioContext) {
+    permissionError.hidden = true;
+    allowButton.disabled = true;
+    allowButton.textContent = "Waiting for microphone permission…";
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !AudioContextClass) {
       permissionError.hidden = false;
       permissionError.textContent = "This browser does not support the voice conversation required for Mabel.";
+      allowButton.disabled = false;
+      allowButton.textContent = "Try microphone again";
       return;
     }
+    let permissionTimer;
     try {
+      let permission = null;
+      try { permission = await navigator.permissions?.query({ name: "microphone" }); } catch (_) {}
+      if (permission?.state === "denied") {
+        throw new Error("Microphone access is blocked for this site. Allow it from the microphone icon in the address bar, then try again.");
+      }
+      permissionTimer = window.setTimeout(() => {
+        permissionError.hidden = false;
+        permissionError.textContent = "Your browser is waiting for microphone permission. Choose Allow from the microphone prompt or the icon in the address bar.";
+      }, 2500);
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
+      window.clearTimeout(permissionTimer);
+      allowButton.textContent = "Starting Mabel…";
       setupBargeIn();
       await audioContext.resume();
       conversationActive = true;
       permissionScreen.hidden = true;
       conversationScreen.hidden = false;
       setCaption(GREETING);
-      await say(GREETING);
-    } catch (_) {
+      say(GREETING);
+    } catch (error) {
+      window.clearTimeout(permissionTimer);
       permissionError.hidden = false;
-      permissionError.textContent = "Microphone access is required to begin a voice conversation with Mabel.";
+      permissionError.textContent = error.message || "Microphone access is required to begin a voice conversation with Mabel.";
+      allowButton.disabled = false;
+      allowButton.textContent = "Try microphone again";
     }
   });
 
