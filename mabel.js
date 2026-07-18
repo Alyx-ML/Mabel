@@ -30,8 +30,7 @@
   let discardRecording = false;
   let lastVoiceAt = 0;
   let recordingStartedAt = 0;
-  let currentAudio;
-  let speechRequest;
+  let currentUtterance;
 
   const setCaption = (text) => { caption.textContent = text; };
   const setStatus = (text) => { status.textContent = text; };
@@ -118,8 +117,7 @@
   };
 
   const finishSpeech = () => {
-    currentAudio = undefined;
-    speechRequest = undefined;
+    currentUtterance = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -131,13 +129,8 @@
   };
 
   const stopSpeaking = (resumeListening = true) => {
-    speechRequest?.abort();
-    speechRequest = undefined;
-    if (currentAudio) {
-      currentAudio.onended = null;
-      try { currentAudio.stop(); } catch (_) {}
-    }
-    currentAudio = undefined;
+    if (currentUtterance || speechSynthesis.speaking) speechSynthesis.cancel();
+    currentUtterance = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -148,34 +141,44 @@
     }
   };
 
+  const findScottishVoice = async () => {
+    const locate = () => speechSynthesis.getVoices().find((voice) =>
+      /fiona|scottish/i.test(`${voice.name} ${voice.voiceURI}`)
+    );
+    const available = locate();
+    if (available) return available;
+    await new Promise((resolve) => {
+      const timer = window.setTimeout(resolve, 1200);
+      speechSynthesis.addEventListener("voiceschanged", () => {
+        window.clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+    return locate();
+  };
+
   const say = async (text) => {
     stopRecognition();
     stopSpeaking(false);
     setStatus("Preparing voice");
-    speechRequest = new AbortController();
     try {
-      const ttsUrl = config.apiUrl.replace(/\/chat\/?$/, "/tts");
-      const response = await fetch(ttsUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: speechRequest.signal
-      });
-      if (!response.ok) throw new Error("Mabel’s voice could not be generated.");
-      const audioData = await response.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(audioData);
-      currentAudio = audioContext.createBufferSource();
-      currentAudio.buffer = audioBuffer;
-      currentAudio.connect(audioContext.destination);
-      currentAudio.onended = finishSpeech;
-      speaking = true;
-      loudFrames = 0;
-      avatar.classList.add("speaking");
-      stopButton.hidden = false;
-      setStatus("Speaking — you can interrupt");
-      currentAudio.start();
+      const voice = await findScottishVoice();
+      if (!voice) throw new Error("Mabel needs Apple’s Fiona Scottish voice installed on this Mac.");
+      currentUtterance = new SpeechSynthesisUtterance(text);
+      currentUtterance.voice = voice;
+      currentUtterance.rate = 1;
+      currentUtterance.pitch = 1;
+      currentUtterance.onstart = () => {
+        speaking = true;
+        loudFrames = 0;
+        avatar.classList.add("speaking");
+        stopButton.hidden = false;
+        setStatus("Speaking — you can interrupt");
+      };
+      currentUtterance.onend = finishSpeech;
+      currentUtterance.onerror = finishSpeech;
+      speechSynthesis.speak(currentUtterance);
     } catch (error) {
-      if (error.name === "AbortError") return;
       setCaption(error.message || "Mabel’s voice could not be generated.");
       finishSpeech();
     }
@@ -316,6 +319,7 @@
     conversationActive = false;
     stopRecognition();
     stopSpeaking(false);
+    speechSynthesis.cancel();
     micStream?.getTracks().forEach((track) => track.stop());
     audioContext?.close();
   });
