@@ -261,6 +261,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     speechAnalyser = outputAnalyser;
     speechSamples = new Uint8Array(outputAnalyser.fftSize);
     speaking = true;
+    setVadMode("speaking", true);
     avatar.classList.add("speaking");
     stopButton.hidden = false;
     setStatus("Speaking — you can interrupt");
@@ -364,7 +365,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     const turn = cancelActiveTurn(false);
     processing = true;
     resetSpeechQueues();
-    setVadMode("speaking", true);
+    setVadMode("inactive", true);
     stopButton.hidden = false;
     setCaption(text);
     queueSpeechText(text, turn);
@@ -375,10 +376,10 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     if (turn !== activeTurn) return;
     processing = true;
     resetSpeechQueues();
-    setVadMode("speaking", true);
+    setVadMode("inactive", true);
     stopButton.hidden = false;
-    setStatus("Thinking — you can interrupt");
-    setCaption("Mabel is thinking…");
+    setStatus("Thinking");
+    setCaption(`You said: “${transcript}”`);
     const messages = history.concat({ role: "user", content: transcript });
     const controller = beginRequest(turn, 60000);
     const speechState = { pending: "", started: false };
@@ -505,7 +506,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         setStatus("Hearing you");
         setCaption("I can hear you…");
       }
-      if (data?.type === "bargein" && !muted && (speaking || processing)) {
+      if (data?.type === "bargein" && !muted && speaking) {
         capturingUser = true;
         listeningActive = false;
         cancelActiveTurn(false, true);
@@ -530,8 +531,8 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       setVadMode("inactive", true);
       setStatus(speaking ? "Speaking" : processing ? "Thinking" : "Microphone off");
     } else if (speaking || processing) {
-      setVadMode("speaking", true);
-      setStatus(speaking ? "Speaking — you can interrupt" : "Thinking — you can interrupt");
+      setVadMode(speaking ? "speaking" : "inactive", true);
+      setStatus(speaking ? "Speaking — you can interrupt" : "Thinking");
     } else {
       startListening();
     }
