@@ -11,15 +11,23 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
   const stopButton = document.querySelector("#stop-button");
   const caption = document.querySelector("#caption");
   const avatar = document.querySelector("#avatar-frame");
+  const avatarImage = avatar.querySelector("img");
   const status = document.querySelector("#connection-status");
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
   const PIPER_VOICE = "en_GB-alba-medium";
+  const AVATAR_FRAMES = [
+    "./public/assets/mabel-portrait.png?v=20260718-9",
+    "./public/assets/mabel-speak-mid.png?v=20260718-9",
+    "./public/assets/mabel-speak-open.png?v=20260718-9"
+  ];
 
   let recorder;
   let micStream;
   let audioContext;
   let analyser;
+  let speechAnalyser;
+  let speechSamples;
   let recognitionActive = false;
   let listeningActive = false;
   let conversationActive = false;
@@ -35,9 +43,24 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
   let recordingStartedAt = 0;
   let currentAudio;
   let speechStartedAt = 0;
+  let avatarFrame = 0;
+  let avatarFrameUpdatedAt = 0;
+
+  AVATAR_FRAMES.forEach((src) => { const image = new Image(); image.src = src; });
 
   const setCaption = (text) => { caption.textContent = text; };
   const setStatus = (text) => { status.textContent = text; };
+
+  const showAvatarFrame = (frame) => {
+    if (avatarFrame === frame) return;
+    avatarFrame = frame;
+    avatarImage.src = AVATAR_FRAMES[frame];
+  };
+
+  const resetAvatarFrame = () => {
+    avatarFrame = -1;
+    showAvatarFrame(0);
+  };
 
   const startListening = () => {
     if (!conversationActive || muted || processing || speaking || listeningActive) return;
@@ -122,8 +145,11 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
 
   const finishSpeech = () => {
     currentAudio = undefined;
+    speechAnalyser = undefined;
+    speechSamples = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
+    resetAvatarFrame();
     stopButton.hidden = true;
     if (!processing && !muted) {
       setStatus("Listening");
@@ -138,8 +164,11 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       try { currentAudio.stop(); } catch (_) {}
     }
     currentAudio = undefined;
+    speechAnalyser = undefined;
+    speechSamples = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
+    resetAvatarFrame();
     stopButton.hidden = true;
     if (resumeListening && !processing && !muted) {
       setStatus("Listening");
@@ -162,12 +191,18 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
       currentAudio = audioContext.createBufferSource();
       currentAudio.buffer = audioBuffer;
-      currentAudio.connect(audioContext.destination);
+      speechAnalyser = audioContext.createAnalyser();
+      speechAnalyser.fftSize = 256;
+      speechAnalyser.smoothingTimeConstant = 0.5;
+      speechSamples = new Uint8Array(speechAnalyser.fftSize);
+      currentAudio.connect(speechAnalyser);
+      speechAnalyser.connect(audioContext.destination);
       currentAudio.onended = finishSpeech;
       speaking = true;
       speechStartedAt = performance.now();
       loudFrames = 0;
       avatar.classList.add("speaking");
+      showAvatarFrame(1);
       stopButton.hidden = false;
       setStatus("Speaking — you can interrupt");
       currentAudio.start();
@@ -223,6 +258,20 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         energy += value * value;
       }
       const rms = Math.sqrt(energy / samples.length);
+      if (speaking && speechAnalyser && speechSamples) {
+        const now = performance.now();
+        if (now - avatarFrameUpdatedAt >= 85) {
+          speechAnalyser.getByteTimeDomainData(speechSamples);
+          let speechEnergy = 0;
+          for (const sample of speechSamples) {
+            const value = (sample - 128) / 128;
+            speechEnergy += value * value;
+          }
+          const speechRms = Math.sqrt(speechEnergy / speechSamples.length);
+          showAvatarFrame(speechRms < 0.018 ? 0 : speechRms < 0.075 ? 1 : 2);
+          avatarFrameUpdatedAt = now;
+        }
+      }
       if (speaking && performance.now() - speechStartedAt > 650 && !muted && rms > 0.08) loudFrames += 1;
       else loudFrames = Math.max(0, loudFrames - 1);
       if (speaking && loudFrames >= 5) {
