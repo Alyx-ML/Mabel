@@ -195,36 +195,56 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     const clean = String(text || "").replace(/\s+/g, " ").trim();
     if (!clean || turn !== activeTurn) return;
     speechTextQueue.push({ text: clean, turn });
+    if (!speaking && !currentAudio) {
+      setStatus("Preparing voice — you can interrupt");
+      setCaption(clean);
+    }
     pumpSynthesis(turn);
   };
 
   const drainSpeakableText = (state, turn, flush = false) => {
     const sentencePattern = /[.!?](?:["'”’)]*)(?:\s+|$)/g;
+    const clausePattern = /[,;:](?:\s+|$)/g;
     while (state.pending.length) {
+      const minimumClause = state.started ? 70 : 40;
+      const maximumChunk = state.started ? 180 : 110;
       let splitAt = -1;
       let match;
       sentencePattern.lastIndex = 0;
       while ((match = sentencePattern.exec(state.pending))) {
-        if (match.index + match[0].length >= 24 || flush) {
-          splitAt = match.index + match[0].length;
+        const candidate = match.index + match[0].length;
+        if ((candidate >= 24 && candidate <= maximumChunk) || flush) {
+          splitAt = candidate;
           break;
         }
       }
-      if (splitAt < 0 && state.pending.length > 220) {
-        splitAt = state.pending.lastIndexOf(" ", 180);
-        if (splitAt < 80) splitAt = 180;
+      if (splitAt < 0 && state.pending.length >= minimumClause) {
+        clausePattern.lastIndex = 0;
+        while ((match = clausePattern.exec(state.pending))) {
+          const candidate = match.index + match[0].length;
+          if (candidate >= minimumClause && candidate <= maximumChunk) {
+            splitAt = candidate;
+            break;
+          }
+        }
+      }
+      if (splitAt < 0 && state.pending.length > maximumChunk) {
+        splitAt = state.pending.lastIndexOf(" ", maximumChunk);
+        if (splitAt < minimumClause) splitAt = maximumChunk;
       }
       if (splitAt < 0) break;
       queueSpeechText(state.pending.slice(0, splitAt), turn);
+      state.started = true;
       state.pending = state.pending.slice(splitAt).trimStart();
     }
     if (flush && state.pending.trim()) {
       queueSpeechText(state.pending, turn);
+      state.started = true;
       state.pending = "";
     }
   };
 
-  const playAudioBuffer = (audioBuffer, turn) => new Promise((resolve) => {
+  const playAudioBuffer = (audioBuffer, text, turn) => new Promise((resolve) => {
     if (turn !== activeTurn) {
       resolve();
       return;
@@ -244,6 +264,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     avatar.classList.add("speaking");
     stopButton.hidden = false;
     setStatus("Speaking — you can interrupt");
+    setCaption(text);
     avatarAnimationRequest = requestAnimationFrame(animateAvatar);
     source.onended = () => {
       if (currentAudio === source) {
@@ -283,7 +304,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       while (turn === activeTurn && speechAudioQueue.length) {
         const item = speechAudioQueue.shift();
         if (item.turn !== turn) continue;
-        await playAudioBuffer(item.audioBuffer, turn);
+        await playAudioBuffer(item.audioBuffer, item.text, turn);
       }
     } finally {
       if (playbackBusyTurn === turn) {
@@ -312,7 +333,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         if (turn !== activeTurn) break;
         const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
         if (turn !== activeTurn) break;
-        speechAudioQueue.push({ audioBuffer, turn });
+        speechAudioQueue.push({ audioBuffer, text: item.text, turn });
         pumpPlayback(turn);
       }
     } catch (error) {
@@ -360,7 +381,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     setCaption("Mabel is thinking…");
     const messages = history.concat({ role: "user", content: transcript });
     const controller = beginRequest(turn, 60000);
-    const speechState = { pending: "" };
+    const speechState = { pending: "", started: false };
     let answer = "";
     try {
       const response = await fetch(config.apiUrl, {
@@ -390,6 +411,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
           if (!delta) continue;
           answer += delta;
           speechState.pending += delta;
+          setStatus("Responding — you can interrupt");
           setCaption(answer.trimStart());
           drainSpeakableText(speechState, turn);
         }
