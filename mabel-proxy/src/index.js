@@ -44,7 +44,7 @@ export default {
       const stream = await env.AI.run(MODEL,{
         messages:[{role:"system",content:SYSTEM_PROMPT},...clean],
         stream:true,
-        reasoning_effort:"none",
+        chat_template_kwargs:{enable_thinking:false,clear_thinking:true},
         max_tokens:400,
         temperature:0.75
       });
