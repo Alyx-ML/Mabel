@@ -381,7 +381,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     setStatus("Thinking");
     setCaption(`You said: “${transcript}”`);
     const messages = history.concat({ role: "user", content: transcript });
-    const controller = beginRequest(turn, 60000);
+    const controller = beginRequest(turn, 90000);
     const speechState = { pending: "", started: false };
     let answer = "";
     try {
