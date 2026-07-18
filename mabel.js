@@ -1,3 +1,5 @@
+import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts-web@1.0.4/+esm";
+
 (() => {
   const config = window.MABEL_CONFIG;
   const permissionScreen = document.querySelector("#permission-screen");
@@ -12,6 +14,7 @@
   const status = document.querySelector("#connection-status");
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
+  const PIPER_VOICE = "en_GB-alba-medium";
 
   let recorder;
   let micStream;
@@ -30,7 +33,8 @@
   let discardRecording = false;
   let lastVoiceAt = 0;
   let recordingStartedAt = 0;
-  let currentUtterance;
+  let currentAudio;
+  let speechStartedAt = 0;
 
   const setCaption = (text) => { caption.textContent = text; };
   const setStatus = (text) => { status.textContent = text; };
@@ -117,7 +121,7 @@
   };
 
   const finishSpeech = () => {
-    currentUtterance = undefined;
+    currentAudio = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -129,8 +133,11 @@
   };
 
   const stopSpeaking = (resumeListening = true) => {
-    if (currentUtterance || speechSynthesis.speaking) speechSynthesis.cancel();
-    currentUtterance = undefined;
+    if (currentAudio) {
+      currentAudio.onended = null;
+      try { currentAudio.stop(); } catch (_) {}
+    }
+    currentAudio = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -141,43 +148,29 @@
     }
   };
 
-  const findScottishVoice = async () => {
-    const locate = () => speechSynthesis.getVoices().find((voice) =>
-      /fiona|scottish/i.test(`${voice.name} ${voice.voiceURI}`)
-    );
-    const available = locate();
-    if (available) return available;
-    await new Promise((resolve) => {
-      const timer = window.setTimeout(resolve, 1200);
-      speechSynthesis.addEventListener("voiceschanged", () => {
-        window.clearTimeout(timer);
-        resolve();
-      }, { once: true });
-    });
-    return locate();
-  };
-
   const say = async (text) => {
     stopRecognition();
     stopSpeaking(false);
     setStatus("Preparing voice");
     try {
-      const voice = await findScottishVoice();
-      if (!voice) throw new Error("Mabel needs Apple’s Fiona Scottish voice installed on this Mac.");
-      currentUtterance = new SpeechSynthesisUtterance(text);
-      currentUtterance.voice = voice;
-      currentUtterance.rate = 1;
-      currentUtterance.pitch = 1;
-      currentUtterance.onstart = () => {
-        speaking = true;
-        loudFrames = 0;
-        avatar.classList.add("speaking");
-        stopButton.hidden = false;
-        setStatus("Speaking — you can interrupt");
-      };
-      currentUtterance.onend = finishSpeech;
-      currentUtterance.onerror = finishSpeech;
-      speechSynthesis.speak(currentUtterance);
+      const wav = await piperTts.predict({ text, voiceId: PIPER_VOICE }, ({ loaded, total }) => {
+        if (!total) return;
+        const percent = Math.min(100, Math.round((loaded / total) * 100));
+        setStatus(`Loading Scottish voice — ${percent}%`);
+        setCaption("Mabel is loading her voice for the first time…");
+      });
+      const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
+      currentAudio = audioContext.createBufferSource();
+      currentAudio.buffer = audioBuffer;
+      currentAudio.connect(audioContext.destination);
+      currentAudio.onended = finishSpeech;
+      speaking = true;
+      speechStartedAt = performance.now();
+      loudFrames = 0;
+      avatar.classList.add("speaking");
+      stopButton.hidden = false;
+      setStatus("Speaking — you can interrupt");
+      currentAudio.start();
     } catch (error) {
       setCaption(error.message || "Mabel’s voice could not be generated.");
       finishSpeech();
@@ -230,7 +223,7 @@
         energy += value * value;
       }
       const rms = Math.sqrt(energy / samples.length);
-      if (speaking && !muted && rms > 0.05) loudFrames += 1;
+      if (speaking && performance.now() - speechStartedAt > 650 && !muted && rms > 0.08) loudFrames += 1;
       else loudFrames = Math.max(0, loudFrames - 1);
       if (speaking && loudFrames >= 5) {
         loudFrames = 0;
@@ -319,7 +312,6 @@
     conversationActive = false;
     stopRecognition();
     stopSpeaking(false);
-    speechSynthesis.cancel();
     micStream?.getTracks().forEach((track) => track.stop());
     audioContext?.close();
   });
