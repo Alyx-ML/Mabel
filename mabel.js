@@ -385,6 +385,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
           if (!data || data === "[DONE]") continue;
           let payload;
           try { payload = JSON.parse(data); } catch (_) { continue; }
+          if (payload.error) throw new Error(payload.error);
           const delta = extractStreamText(payload);
           if (!delta) continue;
           answer += delta;
@@ -397,11 +398,14 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       if (lineBuffer.startsWith("data:")) {
         const data = lineBuffer.slice(5).trim();
         if (data && data !== "[DONE]") {
-          try {
-            const delta = extractStreamText(JSON.parse(data));
+          let payload;
+          try { payload = JSON.parse(data); } catch (_) {}
+          if (payload?.error) throw new Error(payload.error);
+          if (payload) {
+            const delta = extractStreamText(payload);
             answer += delta;
             speechState.pending += delta;
-          } catch (_) {}
+          }
         }
       }
       drainSpeakableText(speechState, turn, true);
