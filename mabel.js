@@ -105,7 +105,7 @@
       if (shouldTranscribe) transcribeAudio(new Blob(audioChunks, { type: mimeType }));
       else if (conversationActive && !muted && !processing && !speaking) window.setTimeout(startListening, 100);
     };
-    recorder.start(200);
+    recorder.start(100);
     setStatus("Hearing you");
     setCaption("I can hear you…");
   };
@@ -242,7 +242,7 @@
         const now = performance.now();
         if (rms > 0.012) lastVoiceAt = now;
         const spokenFor = now - recordingStartedAt;
-        if ((spokenFor > 650 && now - lastVoiceAt > 900) || spokenFor > 20000) finishRecording();
+        if ((spokenFor > 500 && now - lastVoiceAt > 500) || spokenFor > 20000) finishRecording();
       }
       requestAnimationFrame(monitor);
     };

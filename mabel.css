@@ -1,5 +1,6 @@
 :root { color-scheme: dark; --bg:#17131c; --ink:#efe7ee; --muted:#b9aebc; --lav:#c49ed6; --line:rgba(222,212,224,.16); --surface:rgba(196,158,214,.11); }
 * { box-sizing:border-box; }
+[hidden] { display:none !important; }
 html, body { width:100%; min-height:100%; margin:0; }
 body { background:radial-gradient(ellipse at 50% 35%, #2b2030 0%, var(--bg) 53%); color:var(--ink); font-family:"DM Sans",system-ui,sans-serif; font-weight:300; }
 button { font:inherit; }
