@@ -25,6 +25,8 @@
   let handledFinal = false;
   let history = [];
   let loudFrames = 0;
+  let currentAudio;
+  let speechRequest;
 
   const setCaption = (text) => { caption.textContent = text; };
   const setStatus = (text) => { status.textContent = text; };
@@ -42,6 +44,8 @@
   };
 
   const finishSpeech = () => {
+    currentAudio = undefined;
+    speechRequest = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -53,7 +57,13 @@
   };
 
   const stopSpeaking = (resumeListening = true) => {
-    if (speaking || speechSynthesis.speaking) speechSynthesis.cancel();
+    speechRequest?.abort();
+    speechRequest = undefined;
+    if (currentAudio) {
+      currentAudio.onended = null;
+      try { currentAudio.stop(); } catch (_) {}
+    }
+    currentAudio = undefined;
     speaking = false;
     avatar.classList.remove("speaking");
     stopButton.hidden = true;
@@ -64,28 +74,37 @@
     }
   };
 
-  const chooseVoice = () => speechSynthesis.getVoices().find((voice) =>
-    /Samantha|Serena|Karen|Ava|Google UK English Female/i.test(voice.name)
-  );
-
-  const say = (text) => {
+  const say = async (text) => {
     stopRecognition();
     stopSpeaking(false);
-    const utterance = new SpeechSynthesisUtterance(text);
-    const preferred = chooseVoice();
-    if (preferred) utterance.voice = preferred;
-    utterance.rate = 0.98;
-    utterance.pitch = 1.02;
-    utterance.onstart = () => {
+    setStatus("Preparing voice");
+    speechRequest = new AbortController();
+    try {
+      const ttsUrl = config.apiUrl.replace(/\/chat\/?$/, "/tts");
+      const response = await fetch(ttsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: speechRequest.signal
+      });
+      if (!response.ok) throw new Error("Mabel’s voice could not be generated.");
+      const audioData = await response.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(audioData);
+      currentAudio = audioContext.createBufferSource();
+      currentAudio.buffer = audioBuffer;
+      currentAudio.connect(audioContext.destination);
+      currentAudio.onended = finishSpeech;
       speaking = true;
       loudFrames = 0;
       avatar.classList.add("speaking");
       stopButton.hidden = false;
       setStatus("Speaking — you can interrupt");
-    };
-    utterance.onend = finishSpeech;
-    utterance.onerror = finishSpeech;
-    speechSynthesis.speak(utterance);
+      currentAudio.start();
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      setCaption(error.message || "Mabel’s voice could not be generated.");
+      finishSpeech();
+    }
   };
 
   const askMabel = async (transcript) => {
@@ -108,7 +127,7 @@
       ).slice(-12);
       processing = false;
       setCaption(answer);
-      say(answer);
+      await say(answer);
     } catch (error) {
       processing = false;
       setCaption(error.message);
@@ -218,11 +237,12 @@
       });
       setupRecognition();
       setupBargeIn();
+      await audioContext.resume();
       conversationActive = true;
       permissionScreen.hidden = true;
       conversationScreen.hidden = false;
       setCaption(GREETING);
-      say(GREETING);
+      await say(GREETING);
     } catch (_) {
       permissionError.hidden = false;
       permissionError.textContent = "Microphone access is required to begin a voice conversation with Mabel.";
@@ -234,7 +254,7 @@
   window.addEventListener("beforeunload", () => {
     conversationActive = false;
     stopRecognition();
-    speechSynthesis.cancel();
+    stopSpeaking(false);
     micStream?.getTracks().forEach((track) => track.stop());
     audioContext?.close();
   });

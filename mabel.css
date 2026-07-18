@@ -7,6 +7,8 @@ button { font:inherit; }
 .permission-screen, .conversation-screen { min-height:100dvh; }
 .permission-screen { display:grid; place-items:center; padding:28px; }
 .permission-card { width:min(100%, 460px); text-align:center; }
+.permission-avatar { width:176px; aspect-ratio:1; margin:0 auto 24px; padding:6px; border-radius:50%; background:linear-gradient(145deg,rgba(196,158,214,.7),rgba(196,158,214,.12)); box-shadow:0 22px 64px rgba(0,0,0,.42),0 0 45px rgba(196,158,214,.16); }
+.permission-avatar img { display:block; width:100%; height:100%; object-fit:cover; border-radius:50%; }
 .brand, .wordmark { font-family:"Playfair Display",serif; font-size:29px; letter-spacing:.03em; margin:0 0 34px; text-decoration:none; color:var(--ink); }
 h1 { font-family:"Playfair Display",serif; font-weight:400; font-size:clamp(38px,7vw,58px); letter-spacing:-.025em; margin:0 0 17px; line-height:1.04; }
 .permission-card p:not(.brand) { color:var(--muted); font-size:16px; line-height:1.7; margin:0 auto 28px; max-width:380px; }
