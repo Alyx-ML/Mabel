@@ -1,7 +1,27 @@
 const MODEL = "@cf/openai/gpt-oss-120b";
 const SYSTEM_PROMPT = `You are Mabel, an AI companion speaking directly with the user. Your name is Mabel. Always refer to yourself as Mabel. Never identify yourself as Kira. Kira is the name of the original project this application was adapted from, not your identity. Do not inherit Kira's memories, biography, achievements, relationships, creator identity, or personal history. If the user calls you Kira, briefly clarify that your name is Mabel. Speak naturally and conversationally. Do not mention the underlying model provider or implementation unless the user asks a technical question. Keep spoken answers concise unless the user asks for depth.`;
-const allowedOrigins = new Set(["https://alyx-ml.github.io", "http://localhost:8787"]);
+const allowedOrigins = new Set(["https://alyx-ml.github.io", "http://localhost:8787", "http://127.0.0.1:4173"]);
 function cors(request) { const origin = request.headers.get("Origin"); return {"Access-Control-Allow-Origin": allowedOrigins.has(origin) ? origin : "https://alyx-ml.github.io", "Access-Control-Allow-Methods":"POST, OPTIONS", "Access-Control-Allow-Headers":"Content-Type", "Vary":"Origin"}; }
+
+async function triage(lastUserMessage, apiKey) {
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant",
+      messages: [
+        { role: "system", content: "Classify the user's conversational intent as exactly one of: casual, emotional, factual, creative, urgent. Output only the label." },
+        { role: "user", content: lastUserMessage }
+      ],
+      temperature: 0,
+      max_tokens: 8
+    })
+  });
+  if (!response.ok) throw new Error("Triage request failed");
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "casual";
+}
+
 export default {
   async fetch(request, env) {
     const headers = cors(request);
@@ -11,7 +31,9 @@ export default {
       const {messages} = await request.json();
       if (!Array.isArray(messages) || messages.length === 0 || messages.length > 12) return Response.json({error:"Invalid conversation."},{status:400,headers});
       const clean = messages.map(({role,content}) => ({role: role === "assistant" ? "assistant" : "user", content:String(content).slice(0,4000)}));
-      const result = await env.AI.run(MODEL,{messages:[{role:"system",content:SYSTEM_PROMPT},...clean],max_tokens:400,temperature:0.8});
+      if (!env.GROQ_API_KEY) throw new Error("Triage is not configured");
+      const intent = await triage(clean[clean.length - 1].content, env.GROQ_API_KEY);
+      const result = await env.AI.run(MODEL,{messages:[{role:"system",content:`${SYSTEM_PROMPT}\nCurrent conversational intent: ${intent}.`},...clean],max_tokens:400,temperature:0.8});
       const reply = result.response || result.choices?.[0]?.message?.content;
       if (!reply) throw new Error("No model response");
       return Response.json({reply},{headers});

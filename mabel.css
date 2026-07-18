@@ -31,5 +31,6 @@ h1 { font-family:"Playfair Display",serif; font-weight:400; font-size:clamp(38px
 .talk-button { min-width:194px; display:inline-flex; gap:11px; align-items:center; justify-content:center; padding:16px 20px; font-size:15px; font-weight:500; }
 .talk-button svg { width:21px; height:21px; fill:currentColor; }
 .talk-button.listening { background:#c49ed6; color:#211724; transform:scale(1.035); box-shadow:0 0 36px rgba(196,158,214,.5); }
+.talk-button.muted { background:rgba(196,158,214,.08); color:var(--muted); box-shadow:none; }
 .text-button { background:none; color:var(--muted); border:0; cursor:pointer; text-decoration:underline; font-size:14px; }
 @media (max-width:600px) { .conversation-screen { padding:0 24px 25px; } .topbar { height:70px; } .avatar-frame { width:min(79vw,360px); } .caption { font-size:21px; } }
