@@ -10,21 +10,25 @@
   const caption = document.querySelector("#caption");
   const avatar = document.querySelector("#avatar-frame");
   const status = document.querySelector("#connection-status");
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
 
-  let recognition;
+  let recorder;
   let micStream;
   let audioContext;
   let analyser;
   let recognitionActive = false;
+  let listeningActive = false;
   let conversationActive = false;
   let speaking = false;
   let processing = false;
   let muted = false;
-  let handledFinal = false;
   let history = [];
   let loudFrames = 0;
+  let speechFrames = 0;
+  let audioChunks = [];
+  let discardRecording = false;
+  let lastVoiceAt = 0;
+  let recordingStartedAt = 0;
   let currentAudio;
   let speechRequest;
 
@@ -32,15 +36,84 @@
   const setStatus = (text) => { status.textContent = text; };
 
   const startListening = () => {
-    if (!conversationActive || muted || processing || speaking || recognitionActive) return;
-    handledFinal = false;
-    try { recognition.start(); } catch (_) {}
+    if (!conversationActive || muted || processing || speaking || listeningActive) return;
+    listeningActive = true;
+    speechFrames = 0;
+    setStatus("Listening");
+    setCaption("I’m listening.");
   };
 
   const stopRecognition = () => {
-    if (!recognitionActive) return;
-    try { recognition.abort(); } catch (_) {}
-    recognitionActive = false;
+    listeningActive = false;
+    speechFrames = 0;
+    if (recorder && recorder.state !== "inactive") {
+      discardRecording = true;
+      recorder.stop();
+    }
+  };
+
+  const transcribeAudio = async (audioBlob) => {
+    processing = true;
+    setStatus("Understanding");
+    setCaption("Mabel is listening to what you said…");
+    try {
+      const transcribeUrl = config.apiUrl.replace(/\/chat\/?$/, "/transcribe");
+      const response = await fetch(transcribeUrl, {
+        method: "POST",
+        headers: { "Content-Type": audioBlob.type || "application/octet-stream" },
+        body: audioBlob
+      });
+      if (!response.ok) throw new Error("Mabel could not understand the audio.");
+      const data = await response.json();
+      const transcript = String(data.text || "").trim();
+      if (!transcript) {
+        processing = false;
+        setCaption("I didn’t catch that. I’m still listening.");
+        window.setTimeout(startListening, 150);
+        return;
+      }
+      setCaption(`“${transcript}”`);
+      processing = false;
+      await askMabel(transcript);
+    } catch (error) {
+      processing = false;
+      setCaption(error.message || "Mabel could not understand the audio.");
+      setStatus("Listening");
+      window.setTimeout(startListening, 250);
+    }
+  };
+
+  const beginRecording = () => {
+    if (!listeningActive || recognitionActive || muted || processing || speaking) return;
+    const preferredType = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((type) => MediaRecorder.isTypeSupported(type));
+    recorder = preferredType ? new MediaRecorder(micStream, { mimeType: preferredType }) : new MediaRecorder(micStream);
+    audioChunks = [];
+    discardRecording = false;
+    recognitionActive = true;
+    listeningActive = false;
+    recordingStartedAt = performance.now();
+    lastVoiceAt = recordingStartedAt;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) audioChunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      const shouldTranscribe = !discardRecording && audioChunks.length > 0;
+      const mimeType = recorder?.mimeType || preferredType || "application/octet-stream";
+      recognitionActive = false;
+      recorder = undefined;
+      if (shouldTranscribe) transcribeAudio(new Blob(audioChunks, { type: mimeType }));
+      else if (conversationActive && !muted && !processing && !speaking) window.setTimeout(startListening, 100);
+    };
+    recorder.start(200);
+    setStatus("Hearing you");
+    setCaption("I can hear you…");
+  };
+
+  const finishRecording = () => {
+    if (!recorder || recorder.state === "inactive") return;
+    discardRecording = false;
+    setStatus("Understanding");
+    recorder.stop();
   };
 
   const finishSpeech = () => {
@@ -136,49 +209,6 @@
     }
   };
 
-  const setupRecognition = () => {
-    recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = navigator.language || "en-GB";
-
-    recognition.onstart = () => {
-      recognitionActive = true;
-      talkButton.classList.add("listening");
-      setStatus("Listening");
-      setCaption("I’m listening.");
-    };
-
-    recognition.onresult = (event) => {
-      const result = event.results[event.results.length - 1];
-      const text = result[0].transcript.trim();
-      if (!text) return;
-      if (!result.isFinal) {
-        setCaption(`“${text}”`);
-        return;
-      }
-      if (handledFinal) return;
-      handledFinal = true;
-      setCaption(`“${text}”`);
-      stopRecognition();
-      askMabel(text);
-    };
-
-    recognition.onend = () => {
-      recognitionActive = false;
-      if (conversationActive && !muted && !processing && !speaking) {
-        window.setTimeout(startListening, 180);
-      }
-    };
-
-    recognition.onerror = (event) => {
-      recognitionActive = false;
-      if (["aborted", "no-speech"].includes(event.error)) return;
-      setCaption("I didn’t catch that. I’m still listening.");
-      if (!muted && !processing && !speaking) window.setTimeout(startListening, 400);
-    };
-  };
-
   const setupBargeIn = () => {
     audioContext = new AudioContext();
     const source = audioContext.createMediaStreamSource(micStream);
@@ -196,11 +226,22 @@
         energy += value * value;
       }
       const rms = Math.sqrt(energy / samples.length);
-      if (speaking && !muted && rms > 0.075) loudFrames += 1;
+      if (speaking && !muted && rms > 0.05) loudFrames += 1;
       else loudFrames = Math.max(0, loudFrames - 1);
       if (speaking && loudFrames >= 5) {
         loudFrames = 0;
         stopSpeaking(true);
+      }
+      if (listeningActive && !muted && !processing && !speaking) {
+        if (rms > 0.018) speechFrames += 1;
+        else speechFrames = Math.max(0, speechFrames - 1);
+        if (speechFrames >= 3) beginRecording();
+      }
+      if (recognitionActive && recorder?.state === "recording") {
+        const now = performance.now();
+        if (rms > 0.012) lastVoiceAt = now;
+        const spokenFor = now - recordingStartedAt;
+        if ((spokenFor > 650 && now - lastVoiceAt > 900) || spokenFor > 20000) finishRecording();
       }
       requestAnimationFrame(monitor);
     };
@@ -226,7 +267,7 @@
   };
 
   allowButton.addEventListener("click", async () => {
-    if (!navigator.mediaDevices?.getUserMedia || !SpeechRecognition) {
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !window.AudioContext) {
       permissionError.hidden = false;
       permissionError.textContent = "This browser does not support the voice conversation required for Mabel.";
       return;
@@ -235,7 +276,6 @@
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
-      setupRecognition();
       setupBargeIn();
       await audioContext.resume();
       conversationActive = true;

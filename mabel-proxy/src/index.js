@@ -1,4 +1,5 @@
 const MODEL = "@cf/openai/gpt-oss-120b";
+const TRANSCRIPTION_MODEL = "@cf/openai/whisper-large-v3-turbo";
 const SYSTEM_PROMPT = `You are Mabel, an AI companion speaking directly with the user. Your name is Mabel. Always refer to yourself as Mabel. Never identify yourself as Kira. Kira is the name of the original project this application was adapted from, not your identity. Do not inherit Kira's memories, biography, achievements, relationships, creator identity, or personal history. If the user calls you Kira, briefly clarify that your name is Mabel. Speak naturally and conversationally. Do not mention the underlying model provider or implementation unless the user asks a technical question. Keep spoken answers concise unless the user asks for depth.`;
 const allowedOrigins = new Set(["https://alyx-ml.github.io", "http://localhost:8787", "http://127.0.0.1:4173"]);
 function cors(request) { const origin = request.headers.get("Origin"); return {"Access-Control-Allow-Origin": allowedOrigins.has(origin) ? origin : "https://alyx-ml.github.io", "Access-Control-Allow-Methods":"POST, OPTIONS", "Access-Control-Allow-Headers":"Content-Type", "Vary":"Origin"}; }
@@ -8,6 +9,16 @@ function decodeBase64(value) {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
+}
+
+function encodeBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 32768;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function pcmToWav(pcm, sampleRate = 24000) {
@@ -74,8 +85,23 @@ export default {
     const headers = cors(request);
     if (request.method === "OPTIONS") return new Response(null,{headers});
     const path = new URL(request.url).pathname;
-    if (request.method !== "POST" || !["/chat", "/tts"].includes(path)) return new Response("Not found",{status:404,headers});
+    if (request.method !== "POST" || !["/chat", "/tts", "/transcribe"].includes(path)) return new Response("Not found",{status:404,headers});
     try {
+      if (path === "/transcribe") {
+        const contentLength = Number(request.headers.get("Content-Length") || 0);
+        if (contentLength > 10_000_000) return Response.json({error:"Audio is too large."},{status:413,headers});
+        const audio = await request.arrayBuffer();
+        if (audio.byteLength < 1000 || audio.byteLength > 10_000_000) return Response.json({error:"Invalid audio."},{status:400,headers});
+        const result = await env.AI.run(TRANSCRIPTION_MODEL, {
+          audio: encodeBase64(audio),
+          language: "en",
+          vad_filter: true,
+          condition_on_previous_text: false,
+          initial_prompt: "Natural conversational speech addressed to an AI companion named Mabel."
+        });
+        const text = String(result.text || "").trim();
+        return Response.json({text},{headers});
+      }
       if (path === "/tts") {
         const {text} = await request.json();
         const cleanText = String(text || "").trim().slice(0, 3000);
