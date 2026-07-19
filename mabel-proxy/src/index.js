@@ -1,8 +1,6 @@
 const MODEL = "@cf/zai-org/glm-4.7-flash";
 const TRANSCRIPTION_MODEL = "@cf/openai/whisper-large-v3-turbo";
-const MODEL_FIRST_ACTIVITY_TIMEOUT_MS = 20_000;
-const MODEL_STREAM_IDLE_TIMEOUT_MS = 15_000;
-const SYSTEM_PROMPT = `You are Mabel, an AI companion speaking directly with the user. Your name is Mabel. Always refer to yourself as Mabel. Never identify yourself as Kira. Kira is the name of the original project this application was adapted from, not your identity. Do not inherit Kira's memories, biography, achievements, relationships, creator identity, or personal history. If the user calls you Kira, briefly clarify that your name is Mabel. Speak naturally and conversationally. Do not mention the underlying model provider or implementation unless the user asks a technical question. Keep spoken answers concise unless the user asks for depth.`;
+const SYSTEM_PROMPT = `You are Mabel, an AI companion speaking directly with the user. Your name is Mabel. Always refer to yourself as Mabel. Never identify yourself as Kira. Kira is the name of the original project this application was adapted from, not your identity. Do not inherit Kira's memories, biography, achievements, relationships, creator identity, or personal history. If the user calls you Kira, briefly clarify that your name is Mabel. Speak naturally and conversationally. Do not mention the underlying model provider or implementation unless the user asks a technical question. Respond immediately without analysis or reasoning. Every answer must be one short conversational sentence of no more than 18 words.`;
 const allowedOrigins = new Set(["https://alyx-ml.github.io", "http://localhost:8787", "http://127.0.0.1:4173"]);
 function cors(request) { const origin = request.headers.get("Origin"); return {"Access-Control-Allow-Origin": allowedOrigins.has(origin) ? origin : "https://alyx-ml.github.io", "Access-Control-Allow-Methods":"POST, OPTIONS", "Access-Control-Allow-Headers":"Content-Type", "Cache-Control":"no-store", "Vary":"Origin"}; }
 
@@ -14,99 +12,6 @@ function encodeBase64(buffer) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
-}
-
-function withTimeout(promise, timeoutMs, message) {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error(message)), Math.max(1, timeoutMs));
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
-}
-
-function startModel(env, messages) {
-  return env.AI.run(MODEL, {
-    messages,
-    stream: true,
-    chat_template_kwargs: { enable_thinking: false },
-    max_completion_tokens: 400,
-    temperature: 0.75
-  });
-}
-
-async function pipeModelResponse(controller, encoder, env, messages) {
-  const firstActivityDeadline = Date.now() + MODEL_FIRST_ACTIVITY_TIMEOUT_MS;
-  let reader;
-  let pending = "";
-  let streamActive = false;
-  let textStarted = false;
-  try {
-    const stream = await withTimeout(
-      startModel(env, messages),
-      firstActivityDeadline - Date.now(),
-      "Model inference did not start in time"
-    );
-    reader = stream.getReader();
-    const decoder = new TextDecoder();
-    while (true) {
-      const readTimeout = streamActive
-        ? MODEL_STREAM_IDLE_TIMEOUT_MS
-        : firstActivityDeadline - Date.now();
-      const { value, done } = await withTimeout(
-        reader.read(),
-        readTimeout,
-        streamActive ? "Model stream stopped responding" : "Model produced no stream data in time"
-      );
-      if (value?.byteLength) streamActive = true;
-      pending += decoder.decode(value || new Uint8Array(), { stream: !done }).replaceAll("\r\n", "\n");
-      let eventEnd = pending.indexOf("\n\n");
-      while (eventEnd >= 0) {
-        const event = pending.slice(0, eventEnd);
-        pending = pending.slice(eventEnd + 2);
-        const data = event.split("\n").find((line) => line.startsWith("data:"))?.slice(5).trim();
-        if (data === "[DONE]") {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        } else if (data) {
-          let payload;
-          try { payload = JSON.parse(data); } catch (_) {}
-          if (payload?.error) throw new Error(String(payload.error));
-          const content = payload?.choices?.[0]?.delta?.content;
-          if (content) {
-            textStarted = true;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
-          }
-        }
-        eventEnd = pending.indexOf("\n\n");
-      }
-      if (done) break;
-    }
-    if (!textStarted) throw new Error("Model completed without response text");
-  } catch (error) {
-    try { await reader?.cancel(); } catch (_) {}
-    error.streamActive = streamActive;
-    error.textStarted = textStarted;
-    throw error;
-  }
-}
-
-function createModelStream(env, messages) {
-  const encoder = new TextEncoder();
-  return new ReadableStream({
-    async start(controller) {
-      controller.enqueue(encoder.encode(": connected\n\n"));
-      try {
-        await pipeModelResponse(controller, encoder, env, messages);
-      } catch (error) {
-        console.error(JSON.stringify({
-          route: "/chat",
-          event: "model_failed",
-          message: String(error?.message || "Unknown inference failure").slice(0, 160)
-        }));
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "Mabel could not start her response." })}\n\n`));
-      }
-      controller.close();
-    }
-  });
 }
 
 export default {
@@ -136,7 +41,13 @@ export default {
       const {messages} = await request.json();
       if (!Array.isArray(messages) || messages.length === 0 || messages.length > 12) return Response.json({error:"Invalid conversation."},{status:400,headers});
       const clean = messages.map(({role,content}) => ({role: role === "assistant" ? "assistant" : "user", content:String(content).slice(0,4000)}));
-      const stream = createModelStream(env,[{role:"system",content:SYSTEM_PROMPT},...clean]);
+      const stream = await env.AI.run(MODEL,{
+        messages:[{role:"system",content:SYSTEM_PROMPT},...clean],
+        stream:true,
+        chat_template_kwargs:{enable_thinking:false},
+        max_tokens:64,
+        temperature:0.75
+      });
       return new Response(stream,{headers:{...headers,"Content-Type":"text/event-stream; charset=utf-8","Content-Encoding":"identity","X-Content-Type-Options":"nosniff"}});
     } catch (error) {
       console.error(JSON.stringify({route:path,error:error?.name || "Error",message:String(error?.message || "Unknown failure").slice(0,240)}));

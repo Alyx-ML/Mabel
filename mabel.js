@@ -16,6 +16,8 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
   const PIPER_VOICE = "en_GB-alba-medium";
+  const MODEL_COMPLETION_DEADLINE_MS = 5000;
+  const TOTAL_RESPONSE_DEADLINE_MS = 7000;
   const AVATAR_FRAMES = [
     "./public/assets/mabel-portrait.png?v=20260718-9",
     "./public/assets/mabel-speak-mid.png?v=20260718-9",
@@ -144,13 +146,15 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     return activeTurn;
   };
 
-  const beginRequest = (turn, timeoutMs) => {
+  const beginRequest = (turn, timeoutMs, timeoutMessage = "The request timed out.") => {
     if (turn !== activeTurn) throw new DOMException("Turn cancelled", "AbortError");
     activeRequestController?.abort();
     window.clearTimeout(activeRequestTimer);
     const controller = new AbortController();
     activeRequestController = controller;
-    activeRequestTimer = window.setTimeout(() => controller.abort(), timeoutMs);
+    activeRequestTimer = window.setTimeout(() => {
+      controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
+    }, timeoutMs);
     return controller;
   };
 
@@ -191,10 +195,10 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       || "";
   };
 
-  const queueSpeechText = (text, turn) => {
+  const queueSpeechText = (text, turn, deadlineAt) => {
     const clean = String(text || "").replace(/\s+/g, " ").trim();
     if (!clean || turn !== activeTurn) return;
-    speechTextQueue.push({ text: clean, turn });
+    speechTextQueue.push({ text: clean, turn, deadlineAt });
     if (!speaking && !currentAudio) {
       setStatus("Preparing voice — you can interrupt");
       setCaption(clean);
@@ -233,12 +237,12 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         if (splitAt < minimumClause) splitAt = maximumChunk;
       }
       if (splitAt < 0) break;
-      queueSpeechText(state.pending.slice(0, splitAt), turn);
+      queueSpeechText(state.pending.slice(0, splitAt), turn, state.deadlineAt);
       state.started = true;
       state.pending = state.pending.slice(splitAt).trimStart();
     }
     if (flush && state.pending.trim()) {
-      queueSpeechText(state.pending, turn);
+      queueSpeechText(state.pending, turn, state.deadlineAt);
       state.started = true;
       state.pending = "";
     }
@@ -326,14 +330,28 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         const item = speechTextQueue.shift();
         if (item.turn !== turn) continue;
         if (!speaking && !currentAudio) setStatus("Preparing voice");
-        const wav = await piperTts.predict({ text: item.text, voiceId: PIPER_VOICE }, ({ loaded, total }) => {
+        const remaining = item.deadlineAt ? item.deadlineAt - performance.now() : Infinity;
+        if (remaining <= 0) throw new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError");
+        const synthesis = piperTts.predict({ text: item.text, voiceId: PIPER_VOICE }, ({ loaded, total }) => {
           if (turn !== activeTurn || !total) return;
           const percent = Math.min(100, Math.round((loaded / total) * 100));
           setStatus(`Loading Scottish voice — ${percent}%`);
         });
+        const wav = Number.isFinite(remaining)
+          ? await Promise.race([
+              synthesis,
+              new Promise((_, reject) => window.setTimeout(
+                () => reject(new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError")),
+                remaining
+              ))
+            ])
+          : await synthesis;
         if (turn !== activeTurn) break;
         const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
         if (turn !== activeTurn) break;
+        if (item.deadlineAt && performance.now() > item.deadlineAt) {
+          throw new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError");
+        }
         speechAudioQueue.push({ audioBuffer, text: item.text, turn });
         pumpPlayback(turn);
       }
@@ -381,8 +399,9 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     setStatus("Thinking");
     setCaption(`You said: “${transcript}”`);
     const messages = history.concat({ role: "user", content: transcript });
-    const controller = beginRequest(turn, 90000);
-    const speechState = { pending: "", started: false };
+    const responseDeadlineAt = performance.now() + TOTAL_RESPONSE_DEADLINE_MS;
+    const controller = beginRequest(turn, MODEL_COMPLETION_DEADLINE_MS, "Mabel did not complete her response within 5 seconds.");
+    const speechState = { pending: "", started: false, deadlineAt: responseDeadlineAt };
     let answer = "";
     try {
       const response = await fetch(config.apiUrl, {
@@ -442,9 +461,11 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
       clearRequest();
       markStreamComplete(turn);
     } catch (error) {
-      if (turn !== activeTurn || error.name === "AbortError") return;
+      if (turn !== activeTurn) return;
       clearRequest();
-      setCaption(error.message || "Mabel could not complete that response.");
+      setCaption(error.name === "TimeoutError"
+        ? error.message
+        : (error.message || "Mabel could not complete that response."));
       cancelActiveTurn(true);
     }
   };
@@ -457,7 +478,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     setVadMode("inactive", true);
     setStatus("Understanding");
     setCaption("Mabel is listening to what you said…");
-    const controller = beginRequest(turn, 30000);
+    const controller = beginRequest(turn, 30000, "Mabel could not understand the audio in time.");
     try {
       const transcribeUrl = config.apiUrl.replace(/\/chat\/?$/, "/transcribe");
       const audioBlob = encodeWav(new Float32Array(pcmBuffer), sampleRate);
