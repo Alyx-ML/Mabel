@@ -19,7 +19,7 @@ h1 { font-family:"Playfair Display",serif; font-weight:400; font-size:clamp(38px
 .primary-button:hover, .talk-button:hover { transform:translateY(-1px); background:rgba(196,158,214,.28); }
 .error-message { color:#f3a3ae !important; }
 .conversation-screen { display:grid; grid-template-rows:auto 1fr auto; padding:0 clamp(22px,6vw,94px) 30px; }
-.topbar { display:flex; justify-content:space-between; align-items:center; height:84px; }
+.topbar { display:flex; justify-content:space-between; align-items:center; height:84px; border-bottom:1px solid var(--line); }
 .wordmark { font-size:26px; margin:0; }
 .status { color:var(--muted); font-size:14px; }
 .status::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%; background:#b7e4c7; margin:0 8px 1px 0; box-shadow:0 0 12px #b7e4c7; }

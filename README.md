@@ -1,7 +1,5 @@
 ﻿<h1 align="center">KIRA</h1>
 
-> **Mabel adaptation:** See the complete [commit-by-commit Mabel change history](CHANGELOG.md).
-
 <p align="center">
   <strong>A multimodal, memory-persistent AI VTuber that listens, sees, speaks, emotes, and streams — built on a hybrid-cloud cognitive architecture.</strong>
 </p>
@@ -305,5 +303,6 @@ from the dashboard.
 ## License
 
 [AGPL-3.0](LICENSE) — free for personal, educational, and open-source use. Commercial or hosted deployments that modify this software must release their derived source under AGPL-3.0. For a separate commercial license, contact the author.
+
 
 

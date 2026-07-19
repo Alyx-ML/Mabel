@@ -16,42 +16,35 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const GREETING = "Hi, I’m Mabel. I’m here with you. Just start talking whenever you’re ready.";
   const PIPER_VOICE = "en_GB-alba-medium";
-  const MODEL_COMPLETION_DEADLINE_MS = 5000;
-  const TOTAL_RESPONSE_DEADLINE_MS = 7000;
   const AVATAR_FRAMES = [
     "./public/assets/mabel-portrait.png?v=20260718-9",
     "./public/assets/mabel-speak-mid.png?v=20260718-9",
     "./public/assets/mabel-speak-open.png?v=20260718-9"
   ];
 
+  let recorder;
   let micStream;
   let audioContext;
-  let vadNode;
-  let conversationActive = false;
-  let listeningActive = false;
-  let capturingUser = false;
-  let processing = false;
-  let speaking = false;
-  let muted = false;
-  let history = [];
-  let activeTurn = 0;
-  let activeRequestController;
-  let activeRequestTimer;
-  let currentAudio;
-  let currentAudioResolve;
+  let analyser;
   let speechAnalyser;
   let speechSamples;
-  let avatarAnimationRequest;
+  let recognitionActive = false;
+  let listeningActive = false;
+  let conversationActive = false;
+  let speaking = false;
+  let processing = false;
+  let muted = false;
+  let history = [];
+  let loudFrames = 0;
+  let speechFrames = 0;
+  let audioChunks = [];
+  let discardRecording = false;
+  let lastVoiceAt = 0;
+  let recordingStartedAt = 0;
+  let currentAudio;
+  let speechStartedAt = 0;
   let avatarFrame = 0;
   let avatarFrameUpdatedAt = 0;
-  let speechTextQueue = [];
-  let speechAudioQueue = [];
-  let synthesisBusy = false;
-  let synthesisBusyTurn = 0;
-  let playbackBusy = false;
-  let playbackBusyTurn = 0;
-  let streamComplete = false;
-  let synthesisComplete = false;
 
   AVATAR_FRAMES.forEach((src) => { const image = new Image(); image.src = src; });
 
@@ -64,435 +57,42 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     avatarImage.src = AVATAR_FRAMES[frame];
   };
 
-  const stopAvatarAnimation = () => {
-    if (avatarAnimationRequest) cancelAnimationFrame(avatarAnimationRequest);
-    avatarAnimationRequest = undefined;
-    speechAnalyser = undefined;
-    speechSamples = undefined;
-    avatar.classList.remove("speaking");
+  const resetAvatarFrame = () => {
     avatarFrame = -1;
     showAvatarFrame(0);
   };
 
-  const animateAvatar = () => {
-    if (!currentAudio || !speechAnalyser || !speechSamples) {
-      stopAvatarAnimation();
-      return;
-    }
-    const now = performance.now();
-    if (now - avatarFrameUpdatedAt >= 85) {
-      speechAnalyser.getByteTimeDomainData(speechSamples);
-      let energy = 0;
-      for (const sample of speechSamples) {
-        const value = (sample - 128) / 128;
-        energy += value * value;
-      }
-      const rms = Math.sqrt(energy / speechSamples.length);
-      showAvatarFrame(rms < 0.018 ? 0 : rms < 0.075 ? 1 : 2);
-      avatarFrameUpdatedAt = now;
-    }
-    avatarAnimationRequest = requestAnimationFrame(animateAvatar);
-  };
-
-  const setVadMode = (mode, resetCapture = false) => {
-    vadNode?.port.postMessage({ type: "mode", mode, resetCapture });
-  };
-
   const startListening = () => {
-    if (!conversationActive || muted || processing || speaking || capturingUser) return;
+    if (!conversationActive || muted || processing || speaking || listeningActive) return;
     listeningActive = true;
-    setVadMode("listening", true);
+    speechFrames = 0;
     setStatus("Listening");
     setCaption("I’m listening.");
   };
 
-  const stopCurrentAudio = () => {
-    const source = currentAudio;
-    const resolve = currentAudioResolve;
-    currentAudio = undefined;
-    currentAudioResolve = undefined;
-    if (source) {
-      source.onended = null;
-      try { source.stop(); } catch (_) {}
-    }
-    stopAvatarAnimation();
-    resolve?.();
-  };
-
-  const clearRequest = () => {
-    window.clearTimeout(activeRequestTimer);
-    activeRequestTimer = undefined;
-    activeRequestController = undefined;
-  };
-
-  const resetSpeechQueues = () => {
-    speechTextQueue = [];
-    speechAudioQueue = [];
-    streamComplete = false;
-    synthesisComplete = false;
-  };
-
-  const cancelActiveTurn = (resumeListening = true, preserveVadCapture = false) => {
-    activeTurn += 1;
-    activeRequestController?.abort();
-    clearRequest();
-    resetSpeechQueues();
-    stopCurrentAudio();
-    processing = false;
-    speaking = false;
-    stopButton.hidden = true;
-    if (!preserveVadCapture) setVadMode("inactive", true);
-    if (resumeListening && !muted) window.setTimeout(startListening, 80);
-    return activeTurn;
-  };
-
-  const beginRequest = (turn, timeoutMs, timeoutMessage = "The request timed out.") => {
-    if (turn !== activeTurn) throw new DOMException("Turn cancelled", "AbortError");
-    activeRequestController?.abort();
-    window.clearTimeout(activeRequestTimer);
-    const controller = new AbortController();
-    activeRequestController = controller;
-    activeRequestTimer = window.setTimeout(() => {
-      controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
-    }, timeoutMs);
-    return controller;
-  };
-
-  const encodeWav = (pcm, sampleRate) => {
-    const buffer = new ArrayBuffer(44 + (pcm.length * 2));
-    const view = new DataView(buffer);
-    const writeString = (offset, value) => {
-      for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
-    };
-    writeString(0, "RIFF");
-    view.setUint32(4, 36 + (pcm.length * 2), true);
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, "data");
-    view.setUint32(40, pcm.length * 2, true);
-    for (let index = 0; index < pcm.length; index += 1) {
-      const sample = Math.max(-1, Math.min(1, pcm[index]));
-      view.setInt16(44 + (index * 2), sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-    }
-    return new Blob([buffer], { type: "audio/wav" });
-  };
-
-  const extractStreamText = (payload) => {
-    if (!payload) return "";
-    if (typeof payload === "string") return payload;
-    return payload.choices?.[0]?.delta?.content
-      || payload.choices?.[0]?.message?.content
-      || payload.delta?.content
-      || payload.response
-      || payload.output_text
-      || "";
-  };
-
-  const queueSpeechText = (text, turn, deadlineAt) => {
-    const clean = String(text || "").replace(/\s+/g, " ").trim();
-    if (!clean || turn !== activeTurn) return;
-    speechTextQueue.push({ text: clean, turn, deadlineAt });
-    if (!speaking && !currentAudio) {
-      setStatus("Preparing voice — you can interrupt");
-      setCaption(clean);
-    }
-    pumpSynthesis(turn);
-  };
-
-  const drainSpeakableText = (state, turn, flush = false) => {
-    const sentencePattern = /[.!?](?:["'”’)]*)(?:\s+|$)/g;
-    const clausePattern = /[,;:](?:\s+|$)/g;
-    while (state.pending.length) {
-      const minimumClause = state.started ? 70 : 40;
-      const maximumChunk = state.started ? 180 : 110;
-      let splitAt = -1;
-      let match;
-      sentencePattern.lastIndex = 0;
-      while ((match = sentencePattern.exec(state.pending))) {
-        const candidate = match.index + match[0].length;
-        if ((candidate >= 24 && candidate <= maximumChunk) || flush) {
-          splitAt = candidate;
-          break;
-        }
-      }
-      if (splitAt < 0 && state.pending.length >= minimumClause) {
-        clausePattern.lastIndex = 0;
-        while ((match = clausePattern.exec(state.pending))) {
-          const candidate = match.index + match[0].length;
-          if (candidate >= minimumClause && candidate <= maximumChunk) {
-            splitAt = candidate;
-            break;
-          }
-        }
-      }
-      if (splitAt < 0 && state.pending.length > maximumChunk) {
-        splitAt = state.pending.lastIndexOf(" ", maximumChunk);
-        if (splitAt < minimumClause) splitAt = maximumChunk;
-      }
-      if (splitAt < 0) break;
-      queueSpeechText(state.pending.slice(0, splitAt), turn, state.deadlineAt);
-      state.started = true;
-      state.pending = state.pending.slice(splitAt).trimStart();
-    }
-    if (flush && state.pending.trim()) {
-      queueSpeechText(state.pending, turn, state.deadlineAt);
-      state.started = true;
-      state.pending = "";
-    }
-  };
-
-  const playAudioBuffer = (audioBuffer, text, turn) => new Promise((resolve) => {
-    if (turn !== activeTurn) {
-      resolve();
-      return;
-    }
-    const source = audioContext.createBufferSource();
-    const outputAnalyser = audioContext.createAnalyser();
-    outputAnalyser.fftSize = 256;
-    outputAnalyser.smoothingTimeConstant = 0.5;
-    source.buffer = audioBuffer;
-    source.connect(outputAnalyser);
-    outputAnalyser.connect(audioContext.destination);
-    currentAudio = source;
-    currentAudioResolve = resolve;
-    speechAnalyser = outputAnalyser;
-    speechSamples = new Uint8Array(outputAnalyser.fftSize);
-    speaking = true;
-    setVadMode("speaking", true);
-    avatar.classList.add("speaking");
-    stopButton.hidden = false;
-    setStatus("Speaking — you can interrupt");
-    setCaption(text);
-    avatarAnimationRequest = requestAnimationFrame(animateAvatar);
-    source.onended = () => {
-      if (currentAudio === source) {
-        currentAudio = undefined;
-        currentAudioResolve = undefined;
-        stopAvatarAnimation();
-      }
-      resolve();
-    };
-    source.start();
-  });
-
-  const finishVoiceTurn = (turn) => {
-    if (turn !== activeTurn) return;
-    processing = false;
-    speaking = false;
-    stopButton.hidden = true;
-    stopCurrentAudio();
-    setVadMode("inactive", true);
-    window.setTimeout(startListening, 100);
-  };
-
-  const maybeFinishVoiceTurn = (turn) => {
-    if (turn !== activeTurn) return;
-    const synthesizingThisTurn = synthesisBusy && synthesisBusyTurn === turn;
-    const playingThisTurn = playbackBusy && playbackBusyTurn === turn;
-    if (streamComplete && synthesisComplete && !synthesizingThisTurn && !playingThisTurn && !speechAudioQueue.length && !currentAudio) {
-      finishVoiceTurn(turn);
-    }
-  };
-
-  const pumpPlayback = async (turn) => {
-    if (playbackBusy || turn !== activeTurn) return;
-    playbackBusy = true;
-    playbackBusyTurn = turn;
-    try {
-      while (turn === activeTurn && speechAudioQueue.length) {
-        const item = speechAudioQueue.shift();
-        if (item.turn !== turn) continue;
-        await playAudioBuffer(item.audioBuffer, item.text, turn);
-      }
-    } finally {
-      if (playbackBusyTurn === turn) {
-        playbackBusy = false;
-        playbackBusyTurn = 0;
-      }
-      maybeFinishVoiceTurn(turn);
-      if (speechAudioQueue.length && !playbackBusy) pumpPlayback(activeTurn);
-    }
-  };
-
-  const pumpSynthesis = async (turn) => {
-    if (synthesisBusy || turn !== activeTurn) return;
-    synthesisBusy = true;
-    synthesisBusyTurn = turn;
-    try {
-      while (turn === activeTurn && speechTextQueue.length) {
-        const item = speechTextQueue.shift();
-        if (item.turn !== turn) continue;
-        if (!speaking && !currentAudio) setStatus("Preparing voice");
-        const remaining = item.deadlineAt ? item.deadlineAt - performance.now() : Infinity;
-        if (remaining <= 0) throw new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError");
-        const synthesis = piperTts.predict({ text: item.text, voiceId: PIPER_VOICE }, ({ loaded, total }) => {
-          if (turn !== activeTurn || !total) return;
-          const percent = Math.min(100, Math.round((loaded / total) * 100));
-          setStatus(`Loading Scottish voice — ${percent}%`);
-        });
-        const wav = Number.isFinite(remaining)
-          ? await Promise.race([
-              synthesis,
-              new Promise((_, reject) => window.setTimeout(
-                () => reject(new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError")),
-                remaining
-              ))
-            ])
-          : await synthesis;
-        if (turn !== activeTurn) break;
-        const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
-        if (turn !== activeTurn) break;
-        if (item.deadlineAt && performance.now() > item.deadlineAt) {
-          throw new DOMException("Mabel could not begin speaking within 7 seconds.", "TimeoutError");
-        }
-        speechAudioQueue.push({ audioBuffer, text: item.text, turn });
-        pumpPlayback(turn);
-      }
-    } catch (error) {
-      if (turn === activeTurn) {
-        setCaption(error.message || "Mabel’s voice could not be generated.");
-        cancelActiveTurn(true);
-      }
-    } finally {
-      if (synthesisBusyTurn === turn) {
-        synthesisBusy = false;
-        synthesisBusyTurn = 0;
-      }
-      if (turn === activeTurn && streamComplete && !speechTextQueue.length) synthesisComplete = true;
-      maybeFinishVoiceTurn(turn);
-      if (speechTextQueue.length && !synthesisBusy) pumpSynthesis(activeTurn);
-    }
-  };
-
-  const markStreamComplete = (turn) => {
-    if (turn !== activeTurn) return;
-    streamComplete = true;
-    if (!speechTextQueue.length && !(synthesisBusy && synthesisBusyTurn === turn)) synthesisComplete = true;
-    else pumpSynthesis(turn);
-    maybeFinishVoiceTurn(turn);
-  };
-
-  const speakStandalone = (text) => {
-    const turn = cancelActiveTurn(false);
-    processing = true;
-    resetSpeechQueues();
-    setVadMode("inactive", true);
-    stopButton.hidden = false;
-    setCaption(text);
-    queueSpeechText(text, turn);
-    markStreamComplete(turn);
-  };
-
-  const askMabel = async (transcript, turn) => {
-    if (turn !== activeTurn) return;
-    processing = true;
-    resetSpeechQueues();
-    setVadMode("inactive", true);
-    stopButton.hidden = false;
-    setStatus("Thinking");
-    setCaption(`You said: “${transcript}”`);
-    const messages = history.concat({ role: "user", content: transcript });
-    const responseDeadlineAt = performance.now() + TOTAL_RESPONSE_DEADLINE_MS;
-    const controller = beginRequest(turn, MODEL_COMPLETION_DEADLINE_MS, "Mabel did not complete her response within 5 seconds.");
-    const speechState = { pending: "", started: false, deadlineAt: responseDeadlineAt };
-    let answer = "";
-    try {
-      const response = await fetch(config.apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-        body: JSON.stringify({ messages }),
-        signal: controller.signal
-      });
-      if (!response.ok || !response.body) throw new Error("Mabel is unavailable right now.");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let lineBuffer = "";
-      while (turn === activeTurn) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        lineBuffer += decoder.decode(value, { stream: true });
-        const lines = lineBuffer.split(/\r?\n/);
-        lineBuffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === "[DONE]") continue;
-          let payload;
-          try { payload = JSON.parse(data); } catch (_) { continue; }
-          if (payload.error) throw new Error(payload.error);
-          const delta = extractStreamText(payload);
-          if (!delta) continue;
-          answer += delta;
-          speechState.pending += delta;
-          setStatus("Responding — you can interrupt");
-          setCaption(answer.trimStart());
-          drainSpeakableText(speechState, turn);
-        }
-      }
-      if (turn !== activeTurn) return;
-      if (lineBuffer.startsWith("data:")) {
-        const data = lineBuffer.slice(5).trim();
-        if (data && data !== "[DONE]") {
-          let payload;
-          try { payload = JSON.parse(data); } catch (_) {}
-          if (payload?.error) throw new Error(payload.error);
-          if (payload) {
-            const delta = extractStreamText(payload);
-            answer += delta;
-            speechState.pending += delta;
-          }
-        }
-      }
-      drainSpeakableText(speechState, turn, true);
-      const cleanAnswer = answer.trim();
-      if (!cleanAnswer) throw new Error("Mabel did not return a response.");
-      setCaption(cleanAnswer);
-      history = history.concat(
-        { role: "user", content: transcript },
-        { role: "assistant", content: cleanAnswer }
-      ).slice(-12);
-      clearRequest();
-      markStreamComplete(turn);
-    } catch (error) {
-      if (turn !== activeTurn) return;
-      clearRequest();
-      setCaption(error.name === "TimeoutError"
-        ? error.message
-        : (error.message || "Mabel could not complete that response."));
-      cancelActiveTurn(true);
-    }
-  };
-
-  const transcribeAudio = async (pcmBuffer, sampleRate) => {
-    const turn = cancelActiveTurn(false);
-    processing = true;
-    capturingUser = false;
+  const stopRecognition = () => {
     listeningActive = false;
-    setVadMode("inactive", true);
+    speechFrames = 0;
+    if (recorder && recorder.state !== "inactive") {
+      discardRecording = true;
+      recorder.stop();
+    }
+  };
+
+  const transcribeAudio = async (audioBlob) => {
+    processing = true;
     setStatus("Understanding");
     setCaption("Mabel is listening to what you said…");
-    const controller = beginRequest(turn, 30000, "Mabel could not understand the audio in time.");
     try {
       const transcribeUrl = config.apiUrl.replace(/\/chat\/?$/, "/transcribe");
-      const audioBlob = encodeWav(new Float32Array(pcmBuffer), sampleRate);
       const response = await fetch(transcribeUrl, {
         method: "POST",
-        headers: { "Content-Type": "audio/wav" },
-        body: audioBlob,
-        signal: controller.signal
+        headers: { "Content-Type": audioBlob.type || "application/octet-stream" },
+        body: audioBlob
       });
       if (!response.ok) throw new Error("Mabel could not understand the audio.");
       const data = await response.json();
       const transcript = String(data.text || "").trim();
-      clearRequest();
-      if (turn !== activeTurn) return;
       if (!transcript) {
         processing = false;
         setCaption("I didn’t catch that. I’m still listening.");
@@ -500,42 +100,198 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         return;
       }
       setCaption(`“${transcript}”`);
-      await askMabel(transcript, turn);
+      processing = false;
+      await askMabel(transcript);
     } catch (error) {
-      if (turn !== activeTurn || error.name === "AbortError") return;
-      clearRequest();
       processing = false;
       setCaption(error.message || "Mabel could not understand the audio.");
+      setStatus("Listening");
       window.setTimeout(startListening, 250);
     }
   };
 
-  const setupVoicePipeline = async () => {
-    audioContext = new AudioContextClass();
-    await audioContext.audioWorklet.addModule("./mabel-vad-worklet.js?v=20260718-1");
-    const source = audioContext.createMediaStreamSource(micStream);
-    vadNode = new AudioWorkletNode(audioContext, "mabel-vad");
-    const silentOutput = audioContext.createGain();
-    silentOutput.gain.value = 0;
-    source.connect(vadNode);
-    vadNode.connect(silentOutput);
-    silentOutput.connect(audioContext.destination);
-    vadNode.port.onmessage = ({ data }) => {
-      if (data?.type === "speechstart" && listeningActive && !muted) {
-        listeningActive = false;
-        capturingUser = true;
-        setStatus("Hearing you");
-        setCaption("I can hear you…");
-      }
-      if (data?.type === "bargein" && !muted && speaking) {
-        capturingUser = true;
-        listeningActive = false;
-        cancelActiveTurn(false, true);
-        setStatus("Hearing you");
-        setCaption("I can hear you…");
-      }
-      if (data?.type === "utterance" && !muted) transcribeAudio(data.pcm, data.sampleRate);
+  const beginRecording = () => {
+    if (!listeningActive || recognitionActive || muted || processing || speaking) return;
+    const preferredType = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find((type) => MediaRecorder.isTypeSupported(type));
+    recorder = preferredType ? new MediaRecorder(micStream, { mimeType: preferredType }) : new MediaRecorder(micStream);
+    audioChunks = [];
+    discardRecording = false;
+    recognitionActive = true;
+    listeningActive = false;
+    recordingStartedAt = performance.now();
+    lastVoiceAt = recordingStartedAt;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) audioChunks.push(event.data);
     };
+    recorder.onstop = () => {
+      const shouldTranscribe = !discardRecording && audioChunks.length > 0;
+      const mimeType = recorder?.mimeType || preferredType || "application/octet-stream";
+      recognitionActive = false;
+      recorder = undefined;
+      if (shouldTranscribe) transcribeAudio(new Blob(audioChunks, { type: mimeType }));
+      else if (conversationActive && !muted && !processing && !speaking) window.setTimeout(startListening, 100);
+    };
+    recorder.start(100);
+    setStatus("Hearing you");
+    setCaption("I can hear you…");
+  };
+
+  const finishRecording = () => {
+    if (!recorder || recorder.state === "inactive") return;
+    discardRecording = false;
+    setStatus("Understanding");
+    recorder.stop();
+  };
+
+  const finishSpeech = () => {
+    currentAudio = undefined;
+    speechAnalyser = undefined;
+    speechSamples = undefined;
+    speaking = false;
+    avatar.classList.remove("speaking");
+    resetAvatarFrame();
+    stopButton.hidden = true;
+    if (!processing && !muted) {
+      setStatus("Listening");
+      setCaption("I’m listening.");
+      window.setTimeout(startListening, 120);
+    }
+  };
+
+  const stopSpeaking = (resumeListening = true) => {
+    if (currentAudio) {
+      currentAudio.onended = null;
+      try { currentAudio.stop(); } catch (_) {}
+    }
+    currentAudio = undefined;
+    speechAnalyser = undefined;
+    speechSamples = undefined;
+    speaking = false;
+    avatar.classList.remove("speaking");
+    resetAvatarFrame();
+    stopButton.hidden = true;
+    if (resumeListening && !processing && !muted) {
+      setStatus("Listening");
+      setCaption("I’m listening.");
+      window.setTimeout(startListening, 80);
+    }
+  };
+
+  const say = async (text) => {
+    stopRecognition();
+    stopSpeaking(false);
+    setStatus("Preparing voice");
+    try {
+      const wav = await piperTts.predict({ text, voiceId: PIPER_VOICE }, ({ loaded, total }) => {
+        if (!total) return;
+        const percent = Math.min(100, Math.round((loaded / total) * 100));
+        setStatus(`Loading Scottish voice — ${percent}%`);
+        setCaption("Mabel is loading her voice for the first time…");
+      });
+      const audioBuffer = await audioContext.decodeAudioData(await wav.arrayBuffer());
+      currentAudio = audioContext.createBufferSource();
+      currentAudio.buffer = audioBuffer;
+      speechAnalyser = audioContext.createAnalyser();
+      speechAnalyser.fftSize = 256;
+      speechAnalyser.smoothingTimeConstant = 0.5;
+      speechSamples = new Uint8Array(speechAnalyser.fftSize);
+      currentAudio.connect(speechAnalyser);
+      speechAnalyser.connect(audioContext.destination);
+      currentAudio.onended = finishSpeech;
+      speaking = true;
+      speechStartedAt = performance.now();
+      loudFrames = 0;
+      avatar.classList.add("speaking");
+      showAvatarFrame(1);
+      stopButton.hidden = false;
+      setStatus("Speaking — you can interrupt");
+      currentAudio.start();
+    } catch (error) {
+      setCaption(error.message || "Mabel’s voice could not be generated.");
+      finishSpeech();
+    }
+  };
+
+  const askMabel = async (transcript) => {
+    processing = true;
+    setStatus("Thinking");
+    setCaption("Mabel is thinking…");
+    try {
+      const messages = history.concat({ role: "user", content: transcript });
+      const response = await fetch(config.apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages })
+      });
+      if (!response.ok) throw new Error("Mabel is unavailable right now.");
+      const data = await response.json();
+      const answer = data.reply;
+      history = history.concat(
+        { role: "user", content: transcript },
+        { role: "assistant", content: answer }
+      ).slice(-12);
+      processing = false;
+      setCaption(answer);
+      await say(answer);
+    } catch (error) {
+      processing = false;
+      setCaption(error.message);
+      setStatus("Listening");
+      window.setTimeout(startListening, 250);
+    }
+  };
+
+  const setupBargeIn = () => {
+    audioContext = new AudioContextClass();
+    const source = audioContext.createMediaStreamSource(micStream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.45;
+    source.connect(analyser);
+    const samples = new Uint8Array(analyser.fftSize);
+
+    const monitor = () => {
+      analyser.getByteTimeDomainData(samples);
+      let energy = 0;
+      for (const sample of samples) {
+        const value = (sample - 128) / 128;
+        energy += value * value;
+      }
+      const rms = Math.sqrt(energy / samples.length);
+      if (speaking && speechAnalyser && speechSamples) {
+        const now = performance.now();
+        if (now - avatarFrameUpdatedAt >= 85) {
+          speechAnalyser.getByteTimeDomainData(speechSamples);
+          let speechEnergy = 0;
+          for (const sample of speechSamples) {
+            const value = (sample - 128) / 128;
+            speechEnergy += value * value;
+          }
+          const speechRms = Math.sqrt(speechEnergy / speechSamples.length);
+          showAvatarFrame(speechRms < 0.018 ? 0 : speechRms < 0.075 ? 1 : 2);
+          avatarFrameUpdatedAt = now;
+        }
+      }
+      if (speaking && performance.now() - speechStartedAt > 650 && !muted && rms > 0.08) loudFrames += 1;
+      else loudFrames = Math.max(0, loudFrames - 1);
+      if (speaking && loudFrames >= 5) {
+        loudFrames = 0;
+        stopSpeaking(true);
+      }
+      if (listeningActive && !muted && !processing && !speaking) {
+        if (rms > 0.018) speechFrames += 1;
+        else speechFrames = Math.max(0, speechFrames - 1);
+        if (speechFrames >= 3) beginRecording();
+      }
+      if (recognitionActive && recorder?.state === "recording") {
+        const now = performance.now();
+        if (rms > 0.012) lastVoiceAt = now;
+        const spokenFor = now - recordingStartedAt;
+        if ((spokenFor > 500 && now - lastVoiceAt > 500) || spokenFor > 20000) finishRecording();
+      }
+      requestAnimationFrame(monitor);
+    };
+    monitor();
   };
 
   const toggleMicrophone = () => {
@@ -547,14 +303,11 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     talkButton.setAttribute("aria-label", muted ? "Unmute Mabel's microphone" : "Mute Mabel's microphone");
     talkLabel.textContent = muted ? "Microphone off" : "Microphone on";
     if (muted) {
-      capturingUser = false;
-      listeningActive = false;
-      setVadMode("inactive", true);
-      setStatus(speaking ? "Speaking" : processing ? "Thinking" : "Microphone off");
-    } else if (speaking || processing) {
-      setVadMode(speaking ? "speaking" : "inactive", true);
-      setStatus(speaking ? "Speaking — you can interrupt" : "Thinking");
+      stopRecognition();
+      setStatus(speaking ? "Speaking" : "Microphone off");
     } else {
+      setStatus("Listening");
+      setCaption("I’m listening.");
       startListening();
     }
   };
@@ -563,7 +316,7 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
     permissionError.hidden = true;
     allowButton.disabled = true;
     allowButton.textContent = "Waiting for microphone permission…";
-    if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass || !window.AudioWorkletNode) {
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !AudioContextClass) {
       permissionError.hidden = false;
       permissionError.textContent = "This browser does not support the voice conversation required for Mabel.";
       allowButton.disabled = false;
@@ -582,20 +335,17 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
         permissionError.textContent = "Your browser is waiting for microphone permission. Choose Allow from the microphone prompt or the icon in the address bar.";
       }, 2500);
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
       window.clearTimeout(permissionTimer);
       allowButton.textContent = "Starting Mabel…";
-      await setupVoicePipeline();
+      setupBargeIn();
       await audioContext.resume();
       conversationActive = true;
       permissionScreen.hidden = true;
       conversationScreen.hidden = false;
-      setVadMode("inactive", true);
-      setStatus("Calibrating microphone");
-      setCaption("Mabel is adjusting to the room…");
-      await new Promise((resolve) => window.setTimeout(resolve, 650));
-      speakStandalone(GREETING);
+      setCaption(GREETING);
+      say(GREETING);
     } catch (error) {
       window.clearTimeout(permissionTimer);
       permissionError.hidden = false;
@@ -606,12 +356,12 @@ import * as piperTts from "https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts
   });
 
   talkButton.addEventListener("click", toggleMicrophone);
-  stopButton.addEventListener("click", () => cancelActiveTurn(true));
+  stopButton.addEventListener("click", () => stopSpeaking(true));
   window.addEventListener("beforeunload", () => {
     conversationActive = false;
-    cancelActiveTurn(false);
+    stopRecognition();
+    stopSpeaking(false);
     micStream?.getTracks().forEach((track) => track.stop());
-    vadNode?.disconnect();
     audioContext?.close();
   });
 })();
